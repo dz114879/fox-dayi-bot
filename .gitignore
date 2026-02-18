@@ -71,6 +71,8 @@ role_configure/*
 !role_configure/.gitkeep
 rag_data/*
 !rag_data/.gitkeep
+reviewer/*
+!reviewer/put_reviewer_db_here.txt
 
 # test scripts
 test_api_response.py
