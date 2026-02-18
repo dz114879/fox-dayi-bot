@@ -423,7 +423,7 @@ class UnansweredFilter(commands.Cog):
                     await t.edit(applied_tags=new_tags, reason="AI自动贴已解决标签")
 
                     embed = discord.Embed(
-                        description=f"✅ **系统自动贴已解决标签**\n理由：{reason}\n(如有异议，请回复本帖，系统将自动撤销标签)",
+                        description=f"✅ **检测到本帖已满足解决条件**\n理由：{reason}\n(如有异议，请回复本帖，系统将自动撤销标签)",
                         color=discord.Color.green()
                     )
                     await t.send(embed=embed)
@@ -490,8 +490,14 @@ class UnansweredFilter(commands.Cog):
             return
 
         # 检查是否有“已解决”标签
-        # 注意：这里需要重新获取最新的 tags 列表
-        if not thread.parent: return # 异常情况
+        if not thread.parent: return
+
+        # 检查发帖时间是否超过 14 天
+        now = datetime.datetime.now(datetime.timezone.utc)
+        thread_age = now - thread.created_at
+        if thread_age.days >= 14:
+            # 超过 14 天的老帖子，即使有新回复也不再自动重开
+            return
 
         resolved_tag = next((t for t in thread.parent.available_tags if t.id == RESOLVED_TAG_ID), None)
 
@@ -501,7 +507,7 @@ class UnansweredFilter(commands.Cog):
                 new_tags = [t for t in thread.applied_tags if t.id != resolved_tag.id]
                 await thread.edit(applied_tags=new_tags, reason=f"用户 {message.author.name} 新增回复，自动重开")
 
-                await thread.send(f"🔓 **检测到新回复，已自动移除「已解决」标签。**\n本帖将进入明日的自动扫描队列。")
+                await thread.send(f"🔓 **检测到新回复，已自动移除「✅已解决」标签。**\n本帖将进入明日的自动扫描队列。")
 
                 # 强制删除缓存，确保下次扫描时重新判定
                 self._delete_thread_cache(thread.id)
