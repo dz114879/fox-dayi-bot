@@ -37,7 +37,7 @@ if not all([OPENAI_API_KEY, OPENAI_API_BASE_URL, OPENAI_MODEL]):
     print(" [31m[错误] [0m 缺少必要的 OpenAI 环境变量。请检查 .env 文件。")
     bot.openai_client = None
 else:
-    bot.openai_client = openai.OpenAI(
+    bot.openai_client = openai.AsyncOpenAI(
         api_key=OPENAI_API_KEY,
         base_url=OPENAI_API_BASE_URL,
     )
