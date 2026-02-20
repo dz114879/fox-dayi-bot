@@ -29,6 +29,12 @@ try:
 except:
     RESOLVED_TAG_ID = 0
 
+# 待解决标签 ID
+try:
+    UNSOLVED_TAG_ID = int(os.getenv("UNSOLVED_TAG_ID", 0))
+except:
+    UNSOLVED_TAG_ID = 0
+
 # 优先使用通用模型，如果没有则回退到图片描述模型
 AI_MODEL_NAME = os.getenv("OPENAI_MODEL") or os.getenv("IMAGE_DESCRIBE_MODEL")
 RESOLVED_TAG_NAME = os.getenv("RESOLVED_TAG_NAME", "已解决")
@@ -239,8 +245,11 @@ class UnansweredFilter(commands.Cog):
 
         resolved_tag = next((t for t in forum_channel.available_tags if t.id == RESOLVED_TAG_ID), None)
         if not resolved_tag:
-            print(f"❌ [Unanswered] 找不到标签: {RESOLVED_TAG_NAME}")
-            return None, [], []
+            print(f"❌ [Unanswered] 找不到已解决标签: {RESOLVED_TAG_NAME}")
+            return None, None, [], []
+            
+        unsolved_tag = next((t for t in forum_channel.available_tags if t.id == UNSOLVED_TAG_ID), None)
+        # 注意：unsolved_tag 允许为空（如果未配置），不强制报错退出
 
         # 扫描范围：活跃帖子 + 30天内的归档
         target_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)
@@ -348,7 +357,7 @@ class UnansweredFilter(commands.Cog):
                 }
             })
 
-        return resolved_tag, threads_to_analyze, unchanged_results
+        return resolved_tag, unsolved_tag, threads_to_analyze, unchanged_results
 
     async def _call_gemini_batch(self, threads_data: List[Dict[str, Any]], batch_index: int, total_batches: int) -> Dict[str, Any]:
         """发送单个批次的审计请求给 Gemini，返回结构化执行结果。"""
@@ -388,7 +397,7 @@ class UnansweredFilter(commands.Cog):
            - 有人给出了可行方案，且帖子静默超过7天 (days_silent >= 7)。
            - 有人追问细节但楼主超过7天未回。
 
-        2. 未解决:
+        2. 待解决:
            - 对话仍在进行、问题描述不足或无明确结论。
            - 零回复 (true_reply_count == 0)：这是最高优先级，表示只有楼主在自言自语或完全没人理。
            - 方案被楼主明确否定。
@@ -587,7 +596,7 @@ class UnansweredFilter(commands.Cog):
             file=file_obj
         )
 
-    @app_commands.command(name="待办清单", description="[管理员] 强制执行一次未解决帖子扫描")
+    @app_commands.command(name="待办清单", description="[管理员] 强制执行一次待解决帖子扫描")
     async def manual_check(self, interaction: discord.Interaction):
         # 权限检查：仅管理员
         user_id = interaction.user.id
@@ -611,7 +620,7 @@ class UnansweredFilter(commands.Cog):
         try:
             stats = await self.execute_check()
             run_success = True
-            result_msg = f"✅ 扫描完成。\n自动归档: {stats['solved']} 个\n未解决汇报: {stats['unsolved']} 个"
+            result_msg = f"✅ 扫描完成。\n自动归档: {stats['solved']} 个\n待解决汇报: {stats['unsolved']} 个"
         except Exception as e:
             self._last_ai_response_note = f"扫描流程异常: {e}"
             result_msg = f"❌ 扫描失败：{e}"
@@ -633,7 +642,7 @@ class UnansweredFilter(commands.Cog):
         self._ai_expected_total_batches = 0
         self._ai_expected_total_threads = 0
 
-        resolved_tag, threads_to_analyze, unchanged_results = await self._fetch_and_prepare_batch()
+        resolved_tag, unsolved_tag, threads_to_analyze, unchanged_results = await self._fetch_and_prepare_batch()
 
         if not resolved_tag:
             self._last_ai_response_note = "扫描提前结束：未找到目标论坛或已解决标签"
@@ -734,20 +743,56 @@ class UnansweredFilter(commands.Cog):
                 final_unsolved.append((item['thread_obj'], item['reply_count']))
 
         # 3. 执行操作：贴标签
+        # 3.1 处理【已解决】的帖子
         for t, reason in final_solved:
-            if resolved_tag not in t.applied_tags:
-                try:
-                    new_tags = t.applied_tags[:4] # 限制标签数
-                    new_tags.append(resolved_tag)
-                    await t.edit(applied_tags=new_tags, reason="AI自动贴已解决标签")
+            # 逻辑：加 Resolved，删 Unsolved
+            should_edit = False
+            current_tags = list(t.applied_tags)
+            new_tags = []
+            
+            # 移除待解决标签
+            if unsolved_tag and unsolved_tag in current_tags:
+                new_tags = [tag for tag in current_tags if tag.id != unsolved_tag.id]
+                should_edit = True
+            else:
+                new_tags = list(current_tags)
 
-                    embed = discord.Embed(
-                        description=f"✅ **检测到本帖已满足解决条件**\n理由：{reason}\n(如有异议，请回复本帖，系统将自动撤销标签)",
-                        color=discord.Color.green()
-                    )
-                    await t.send(embed=embed)
+            # 添加已解决标签
+            if resolved_tag not in new_tags:
+                if len(new_tags) >= 5: new_tags.pop(0) # 保持 Discord 5个标签限制
+                new_tags.append(resolved_tag)
+                should_edit = True
+
+            if should_edit:
+                try:
+                    await t.edit(applied_tags=new_tags, reason="AI判定已解决(自动互斥)")
+                    # 只有在原本没有已解决标签时才发通知，避免重复刷屏
+                    if resolved_tag not in current_tags:
+                        embed = discord.Embed(
+                            description=f"✅ **检测到本帖已满足解决条件**\n理由：{reason}\n(如有异议，请回复本帖，系统将自动撤销标签)",
+                            color=discord.Color.green()
+                        )
+                        await t.send(embed=embed)
                 except Exception as e:
-                    print(f"❌ 贴标签失败 {t.name}: {e}")
+                    print(f"❌ [Solved] 标签变更失败 {t.name}: {e}")
+
+        # 3.2 处理【待解决】的帖子 (补全标签)
+        # 逻辑：如果此时没有 Unsolved 标签，且没有 Resolved 标签，强制加上 Unsolved
+        if unsolved_tag:
+            for t, _ in final_unsolved:
+                # 再次检查，防止状态在运行期间改变
+                if resolved_tag in t.applied_tags:
+                    continue
+
+                if unsolved_tag not in t.applied_tags:
+                    try:
+                        new_tags = list(t.applied_tags)
+                        if len(new_tags) >= 5: new_tags.pop(0)
+                        new_tags.append(unsolved_tag)
+                        await t.edit(applied_tags=new_tags, reason="AI判定待解决(补全标签)")
+                        print(f"🔹 [Unanswered] 为 {t.name} 补全了待解决标签")
+                    except Exception as e:
+                        print(f"❌ [Unsolved] 标签补全失败 {t.name}: {e}")
 
         # 4. 执行操作：发送汇报
         if final_unsolved and REPORT_CHANNEL_ID:
@@ -759,8 +804,8 @@ class UnansweredFilter(commands.Cog):
 
                 # 构建 Embed
                 embed = discord.Embed(
-                    title=f"📅 {datetime.date.today()} 未解决问题汇总",
-                    description="以下问题仍未解决，请大家看看是否能提供帮助！",
+                    title=f"📅 {datetime.date.today()} 待解决问题汇总",
+                    description="以下问题仍待解决，请大家看看是否能提供帮助！",
                     color=discord.Color.orange()
                 )
 
@@ -820,14 +865,20 @@ class UnansweredFilter(commands.Cog):
             return
 
         resolved_tag = next((t for t in thread.parent.available_tags if t.id == RESOLVED_TAG_ID), None)
+        unsolved_tag = next((t for t in thread.parent.available_tags if t.id == UNSOLVED_TAG_ID), None)
 
         if resolved_tag and resolved_tag in thread.applied_tags:
             try:
-                # 移除标签
+                # 移除已解决，添加待解决
                 new_tags = [t for t in thread.applied_tags if t.id != resolved_tag.id]
+                
+                if unsolved_tag and unsolved_tag not in new_tags:
+                    if len(new_tags) >= 5: new_tags.pop(0)
+                    new_tags.append(unsolved_tag)
+                
                 await thread.edit(applied_tags=new_tags, reason=f"用户 {message.author.name} 新增回复，自动重开")
 
-                await thread.send(f"🔓 **检测到新回复，已自动移除「✅已解决」标签。**\n本帖将进入明日的自动扫描队列。")
+                await thread.send(f"🔓 **检测到新回复，已自动切换为「❓待解决」标签。**\n本帖将进入明日的自动扫描队列。")
 
                 # 强制删除缓存，确保下次扫描时重新判定
                 self._delete_thread_cache(thread.id)
