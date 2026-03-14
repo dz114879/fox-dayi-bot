@@ -93,3 +93,6 @@ prompt/*
 # docs
 
 /docs
+
+# exclude naoleiwiki-main workspace copy
+naoleiwiki-main/
